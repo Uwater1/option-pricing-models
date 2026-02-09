@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Option Pricing Simulation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Option Pricing Simulation</h1>
+
+        <div class="simulation-layout">
+            <div class="controls">
+                <h2>Parameters</h2>
+                <div class="input-group">
+                    <label for="S">Spot Price (S):</label>
+                    <input type="number" id="S" value="100" step="0.1">
+                </div>
+                <div class="input-group">
+                    <label for="K">Strike Price (K):</label>
+                    <input type="number" id="K" value="100" step="0.1">
+                </div>
+                <div class="input-group">
+                    <label for="T">Time to Maturity (Years):</label>
+                    <input type="number" id="T" value="1.0" step="0.01">
+                </div>
+                <div class="input-group">
+                    <label for="r">Risk-free Rate (r):</label>
+                    <input type="number" id="r" value="0.05" step="0.001">
+                </div>
+                <div class="input-group">
+                    <label for="sigma">Volatility (&sigma;):</label>
+                    <input type="number" id="sigma" value="0.2" step="0.01">
+                </div>
+
+                <div class="results">
+                    <h3>Results</h3>
+                    <p>Call Price: <span id="call-price">-</span></p>
+                    <p>Put Price: <span id="put-price">-</span></p>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h2>Payoff Diagram</h2>
+                <canvas id="payoffChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
