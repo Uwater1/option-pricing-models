@@ -1,5 +1,5 @@
-from enum import Enum
 from abc import ABC, abstractmethod
+from enum import Enum
 
 class OPTION_TYPE(Enum):
     CALL_OPTION = 'Call Option'
@@ -15,16 +15,14 @@ class OptionPricingModel(ABC):
         elif option_type == OPTION_TYPE.PUT_OPTION.value:
             return self._calculate_put_option_price()
         else:
-            return -1
+            raise ValueError(f"Unknown option type: {option_type}")
 
-    @classmethod
     @abstractmethod
-    def _calculate_call_option_price(cls):
+    def _calculate_call_option_price(self):
         """Calculates option price for call option."""
         pass
 
-    @classmethod
     @abstractmethod
-    def _calculate_put_option_price(cls):
+    def _calculate_put_option_price(self):
         """Calculates option price for put option."""
         pass

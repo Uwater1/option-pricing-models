@@ -1,116 +1,70 @@
 # Option Pricing Models
 
 ## Introduction
-This repository contains a simple web app for calculating European option prices using three different methods:
+This repository contains tools for calculating European option prices using three different methods:
 
 1. Black-Scholes model
 2. Monte Carlo simulation
 3. Binomial model
 
-The app is implemented in Python 3.9 and uses the Streamlit library for visualization.
+It consists of two main parts:
+1. **Python Library (`option_pricing/`)**: A flexible and efficient Python package for option pricing, designed to be easily plugged into backtesting systems.
+2. **Web Simulation (`docs/`)**: A browser-based simulation for visualizing option pricing (hosted on GitHub Pages).
 
 ## Option Pricing Methods
 
 ### 1. Black-Scholes Model
-A mathematical model used to calculate the theoretical price of European-style options, based on factors like current stock price, strike price, time to expiration, risk-free rate, and volatility.
+A mathematical model used to calculate the theoretical price of European-style options.
 
 ### 2. Monte Carlo Simulation
-A probabilistic method that uses random sampling to estimate option prices by simulating multiple possible price paths of the underlying asset.
+A probabilistic method that uses random sampling to estimate option prices. The Python implementation is vectorized for high performance.
 
 ### 3. Binomial Model
-A discrete-time model that represents the evolution of the underlying asset's price as a binomial tree, allowing for the calculation of option prices at different time steps.
-
-## Features
-
-- Fetches latest stock price data from Yahoo Finance API using pandas-datareader
-- Caches data using requests-cache to avoid duplicate API calls
-- Allows users to input various parameters:
-  - Strike price
-  - Risk-free rate (%)
-  - Sigma (Volatility) (%)
-  - Exercise date
-- Calculates option prices based on user inputs
-- Provides a user-friendly interface for testing different scenarios
+A discrete-time model (Binomial Tree) for calculating option prices.
 
 ## Project Structure
 
-- `demo/`: Contains GIF files demonstrating the Streamlit app
-- `option_pricing/`: Python package containing model implementations
-- `streamlit_app.py`: Main script for the Streamlit web app
-- `Requirements.txt`: List of required Python packages
-- `Dockerfile`: Configuration for running the app in a Docker container
+- `option_pricing/`: Python package containing model implementations.
+  - `black_scholes.py`: Black-Scholes model (class and function).
+  - `monte_carlo.py`: Monte Carlo simulation (class and vectorized function).
+  - `binomial.py`: Binomial Tree model (class and function).
+- `docs/`: Web-based simulation (HTML/JS/CSS) for GitHub Pages.
+- `verify_real_data.py`: Script to verify models using real-world data from Yahoo Finance.
+- `requirements.txt`: Python dependencies.
 
-## How to Run the App
+## Usage
 
-### Using Docker Locally
-The easiest way to run the app is using Docker. Make sure you have Docker installed on your machine before proceeding.
+### Python Library
 
-1. Navigate to the repository directory in your terminal.
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-2. Build the Docker image:
-   ```
-   docker build -t options-pricing:latest .
-   ```
+Example usage:
+```python
+from option_pricing import black_scholes_price, monte_carlo_price
 
-3. Verify the image was built successfully:
-   ```
-   docker image ls
-   ```
+S = 100  # Spot Price
+K = 100  # Strike Price
+T = 1.0  # Time to Maturity (Years)
+r = 0.05 # Risk-free Rate
+sigma = 0.2 # Volatility
 
-4. Run the Docker container:
-   ```
-   docker run -p 8080:8080 options-pricing:latest
-   ```
+price_bs = black_scholes_price(S, K, T, r, sigma, 'call')
+print(f"Black-Scholes Price: {price_bs}")
 
-5. Access the app in your web browser at:
-   ```
-   http://0.0.0.0:8080/
-   ```
+price_mc = monte_carlo_price(S, K, T, r, sigma, 'call')
+print(f"Monte Carlo Price: {price_mc}")
+```
 
-### Using Google Cloud
+### Verification with Real Data
 
-To deploy the Docker container to Google Cloud Platform (GCP), follow these steps:
+You can verify the models against real market data (fetched via `yfinance`) by running:
+```bash
+python verify_real_data.py
+```
 
-1. Prerequisites:
-   - Have a Google account
-   - Create a project on Google Cloud Console
-   - Set up billing for your project (be aware of GCP's pricing structure)
-   - Install and set up Google Cloud SDK
+### Web Simulation
 
-2. Verify and set your GCP project:
-   - Check the current project:
-     ```
-     gcloud config get-value project
-     ```
-   - Set a different project if needed:
-     ```
-     gcloud config set project YOUR_PROJECT_NAME
-     ```
-
-3. Deploy the application:
-   - Run the following command (uses the app.yaml file in your project):
-     ```
-     gcloud app deploy
-     ```
-   - Select the nearest server location when prompted
-   - Wait for the deployment process to complete
-
-4. Access your web app:
-   - After deployment, you'll receive a URL for your app
-   - The URL format will be: https://YOUR_PROJECT_NAME.REGION.r.appspot.com/
-   - You can also find this URL in the Google Cloud Console
-
-Note: Ensure you understand GCP's pricing before deploying to avoid unexpected charges.
-
-## Streamlit Web App Demonstrations
-
-### Black-Scholes Model
-![black-scholes-demo](media/Black_Scholes_Model.gif)
-
-### Monte Carlo Option Pricing
-![monte-carlo-demo](media/Monte_Carlo_Option_Pricing.gif)
-
-### Binomial Model
-![binomial-tree-demo](media/Binomial_Model.gif)
-
-By following these instructions, you can easily set up and explore the option pricing models using the Streamlit web app. Feel free to experiment with different parameters and see how they affect the calculated option prices.
+Open `docs/index.html` in your web browser to interact with the option pricing simulation. This can be hosted on GitHub Pages by enabling it for the `docs/` folder in repository settings.
