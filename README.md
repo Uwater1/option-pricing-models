@@ -67,4 +67,9 @@ python verify_real_data.py
 
 ### Web Simulation
 
-Open `docs/index.html` in your web browser to interact with the option pricing simulation. This can be hosted on GitHub Pages by enabling it for the `docs/` folder in repository settings.
+The web-based simulation is automatically deployed to GitHub Pages. You can access it here:
+**[Option Pricing Simulation](https://hallop.github.io/option-pricing-models/)**
+
+*(Note: Replace `hallop` with your GitHub username if different.)*
+
+To run locally, simply open `docs/index.html` in your web browser.
