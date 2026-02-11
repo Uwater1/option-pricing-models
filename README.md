@@ -65,6 +65,22 @@ You can verify the models against real market data (fetched via `yfinance`) by r
 python verify_real_data.py
 ```
 
+### Bid-Ask Spread Prediction
+
+To estimate the fair Bid and Ask prices for an option based on its Last Price, Strike, and Underlying Price, use `estimate_fair_value.py`. This uses a polynomial model trained on market data to predict the spread.
+
+```bash
+python estimate_fair_value.py <LAST_PRICE> <STRIKE> <UNDERLYING> <Calendar_DAYS_TO_EXPIRE> [optional: --type call/put]
+```
+
+**Note on Days to Expiration:**
+For option pricing models (Black-Scholes), it is standard to use **Calendar Days** (365 days/year) because interest accumulates daily. While trading days (252) are often used for volatility, using calendar days for time-to-decay is the convention. Please input the number of calendar days until expiration (e.g., 30 for one month).
+
+**Example:**
+```bash
+python estimate_fair_value.py 10.50 200 205 30 --type call
+```
+
 ### Web Simulation
 
 The web-based simulation is automatically deployed to GitHub Pages. You can access it here:

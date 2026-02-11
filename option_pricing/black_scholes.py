@@ -1,7 +1,25 @@
 import numpy as np
 from scipy.stats import norm
 from .base import OptionPricingModel, OPTION_TYPE
+from scipy.optimize import brentq
 
+def implied_volatility(price, S, K, T, r, option_type='call'):
+    """
+    Calculate Implied Volatility using Brent's method.
+    """
+    def objective(sigma):
+        return black_scholes_price(S, K, T, r, sigma, option_type) - price
+    
+    # Check arbitrage bounds first (basic check, could be more robust)
+    intrinsic = max(0, S - K) if option_type == 'call' else max(0, K - S)
+    if price <= intrinsic + 1e-5: # Slightly relaxed for float issues
+        return 0.0 # Or error, but 0.0 effectively means flat price
+        
+    try:
+        # Search for vol between 0.1% and 500%
+        return brentq(objective, 0.001, 5.0, xtol=1e-6)
+    except ValueError:
+        return np.nan # Or 0, or handle error. NaN is safer for data cleaning.
 def black_scholes_price(S, K, T, r, sigma, option_type='call'):
     """
     Calculate Black-Scholes option price.
