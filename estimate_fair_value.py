@@ -12,7 +12,43 @@ except ImportError:
     XGB_AVAILABLE = False
     print("Warning: XGBoost not installed. Spread prediction might be less accurate (falling back to polynomial model).")
 
-# Load C++ Library
+# Load C++ Library (with fallback to pure Python)
+from scipy.stats import norm
+from scipy.optimize import brentq
+
+def _python_implied_volatility(price, S, K, T, r, is_call):
+    """Pure Python fallback for implied volatility calculation."""
+    option_type = 'call' if is_call else 'put'
+    
+    def objective(sigma):
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        if is_call:
+            bs_price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        else:
+            bs_price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        return bs_price - price
+    
+    intrinsic = max(0, S - K) if is_call else max(0, K - S)
+    if price <= intrinsic + 1e-5:
+        return 0.0
+    try:
+        return brentq(objective, 0.001, 5.0, xtol=1e-6)
+    except ValueError:
+        return np.nan
+
+def _python_vega(S, K, T, r, sigma):
+    """Pure Python fallback for vega calculation."""
+    T = max(T, 1e-10)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    return S * norm.pdf(d1) * np.sqrt(T)
+
+def _python_gamma(S, K, T, r, sigma):
+    """Pure Python fallback for gamma calculation."""
+    T = max(T, 1e-10)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    return norm.pdf(d1) / (S * sigma * np.sqrt(T))
+
 lib_path = os.path.join(os.path.dirname(__file__), 'libbs.so')
 try:
     lib = ctypes.CDLL(lib_path)
@@ -22,18 +58,25 @@ try:
     lib.black_scholes_vega.restype = ctypes.c_double
     lib.black_scholes_gamma.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
     lib.black_scholes_gamma.restype = ctypes.c_double
+    CPP_LIB_AVAILABLE = True
 except OSError:
-    print("Error: Could not load C++ library libbs.so. Ensure it is compiled and in the same directory.")
-    sys.exit(1)
+    print("Warning: Could not load C++ library libbs.so. Falling back to pure Python implementation.")
+    CPP_LIB_AVAILABLE = False
 
 def fast_iv(price, S, K, T, r, is_call):
-    return lib.implied_volatility(price, S, K, T, r, is_call)
+    if CPP_LIB_AVAILABLE:
+        return lib.implied_volatility(price, S, K, T, r, is_call)
+    return _python_implied_volatility(price, S, K, T, r, is_call)
 
 def fast_vega(S, K, T, r, sigma):
-    return lib.black_scholes_vega(S, K, T, r, sigma)
+    if CPP_LIB_AVAILABLE:
+        return lib.black_scholes_vega(S, K, T, r, sigma)
+    return _python_vega(S, K, T, r, sigma)
 
 def fast_gamma(S, K, T, r, sigma):
-    return lib.black_scholes_gamma(S, K, T, r, sigma)
+    if CPP_LIB_AVAILABLE:
+        return lib.black_scholes_gamma(S, K, T, r, sigma)
+    return _python_gamma(S, K, T, r, sigma)
 
 # Polynomial Coefficients (Fallback)
 POLY_COEFFS = {
