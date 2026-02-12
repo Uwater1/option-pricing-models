@@ -3,6 +3,7 @@ import numpy as np
 import os
 import ctypes
 import sys
+import pandas as pd
 
 # Try importing XGBoost
 try:
@@ -65,6 +66,27 @@ def _python_theta(S, K, T, r, sigma, is_call):
     term3 = r * K * np.exp(-r * T) * norm.cdf(-d2)
     return (term1 - term2) / 365.0 if is_call else (term1 + term3) / 365.0
 
+def _python_greeks_all(S, K, T, r, sigma, is_call):
+    """Calculate all Greeks in one pass, sharing d1/d2 computation."""
+    T = max(T, 1e-10)
+    sqrt_T = np.sqrt(T)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    pdf_d1 = norm.pdf(d1)
+    exp_rT = np.exp(-r * T)
+
+    delta = norm.cdf(d1) if is_call else (norm.cdf(d1) - 1.0)
+    gamma = pdf_d1 / (S * sigma * sqrt_T)
+    vega = S * pdf_d1 * sqrt_T
+
+    term1 = -(S * pdf_d1 * sigma) / (2 * sqrt_T)
+    if is_call:
+        theta = (term1 - r * K * exp_rT * norm.cdf(d2)) / 365.0
+    else:
+        theta = (term1 + r * K * exp_rT * norm.cdf(-d2)) / 365.0
+
+    return delta, gamma, vega, theta
+
 lib_path = os.path.join(os.path.dirname(__file__), 'libbs.so')
 try:
     lib = ctypes.CDLL(lib_path)
@@ -109,6 +131,9 @@ def fast_theta(S, K, T, r, sigma, is_call):
     return _python_theta(S, K, T, r, sigma, is_call)
 
 
+# Module-level cache for XGBoost models
+_xgb_model_cache = {}
+
 def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
     M, T, IV = moneyness, time_to_expire_years, iv
     rel_spread = (POLY_COEFFS['b0'] + 
@@ -120,9 +145,22 @@ def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
                   POLY_COEFFS['b6']*T*IV)
     return max(0.001, min(0.5, rel_spread)) * last_price
 
+# Feature names for XGBoost DMatrix (defined once)
+_XGB_FEATURE_NAMES = ['moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 'delta', 'theta',
+                      'log_volume', 'log_oi', 'is_call', 'dist_from_atm', 'inv_price', 'mid']
+
 def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, theta, volume, oi, is_call, last_price, model_path="spread_xgb.json"):
-    if not XGB_AVAILABLE or not os.path.exists(model_path):
+    if not XGB_AVAILABLE:
         return None
+    
+    # Load and cache the model (only once per model_path)
+    if model_path not in _xgb_model_cache:
+        if not os.path.exists(model_path):
+            return None
+        model = xgb.Booster()
+        model.load_model(model_path)
+        _xgb_model_cache[model_path] = model
+    model = _xgb_model_cache[model_path]
     
     # Layer 2: Prediction of the Residual (Correction)
     inv_price = 1.0 / last_price if last_price > 0 else 0.0
@@ -130,26 +168,10 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
     log_volume = np.log1p(volume)
     log_oi = np.log1p(oi)
     
-    import pandas as pd
-    features = pd.DataFrame([{
-        'moneyness': moneyness,
-        'time_to_expire_years': time_to_expire_years,
-        'iv': iv,
-        'gamma': gamma,
-        'vega': vega,
-        'delta': delta,
-        'theta': theta,
-        'log_volume': log_volume,
-        'log_oi': log_oi,
-        'is_call': int(is_call),
-        'dist_from_atm': dist_from_atm,
-        'inv_price': inv_price,
-        'mid': last_price
-    }])
-    
-    model = xgb.Booster()
-    model.load_model(model_path)
-    dtest = xgb.DMatrix(features)
+    # Use numpy array directly instead of pandas DataFrame
+    features = np.array([[moneyness, time_to_expire_years, iv, gamma, vega, delta, theta,
+                          log_volume, log_oi, int(is_call), dist_from_atm, inv_price, last_price]])
+    dtest = xgb.DMatrix(features, feature_names=_XGB_FEATURE_NAMES)
     
     # Predict the RESIDUAL (correction)
     residual_correction = model.predict(dtest)[0]
@@ -176,11 +198,16 @@ def estimate_fair_value(last_price, strike, underlying_price, days_to_expire, op
     
     if iv <= 0.001: iv = 0.3 # Fallback if IV fails
     if iv > 10.0: iv = 10.0    # Clamp
-        
-    theta = fast_theta(underlying_price, strike, time_years, r, iv, is_call)
-    delta = fast_delta(underlying_price, strike, time_years, r, iv, is_call)
-    gamma = fast_gamma(underlying_price, strike, time_years, r, iv)
-    vega = fast_vega(underlying_price, strike, time_years, r, iv)
+    
+    # Calculate all Greeks in one pass (avoids redundant d1/d2 computation)
+    if CPP_LIB_AVAILABLE:
+        theta = fast_theta(underlying_price, strike, time_years, r, iv, is_call)
+        delta = fast_delta(underlying_price, strike, time_years, r, iv, is_call)
+        gamma = fast_gamma(underlying_price, strike, time_years, r, iv)
+        vega = fast_vega(underlying_price, strike, time_years, r, iv)
+    else:
+        delta, gamma, vega, theta = _python_greeks_all(
+            underlying_price, strike, time_years, r, iv, is_call)
     
     # Liquidity proxies (default to 10 if not provided for safety in inference)
     volume = 10 
