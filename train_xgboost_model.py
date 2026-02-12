@@ -166,6 +166,38 @@ def train_xgboost():
     full_df['time_value'] = (full_df['lastPrice'] - full_df['intrinsic']).clip(lower=0)
     full_df['time_value_ratio'] = full_df['time_value'] / full_df['lastPrice'].clip(lower=0.01)
     
+    # --- NEW MICROSTRUCTURE FEATURES (from ideas.md) ---
+    # 1. Strike Roundness (Psychological Liquidity)
+    full_df['strike_mod_5'] = (full_df['strike'] % 5 == 0).astype(int)
+    full_df['strike_mod_1'] = (full_df['strike'] % 1 == 0).astype(int)
+
+    # 2. Tick Size Regime Proxy (Options < $3.00 often have different tick constraints)
+    full_df['is_low_price'] = (full_df['lastPrice'] < 3.0).astype(int)
+
+    # 3. Advanced Greeks (Vanna / Volga / Cash Gamma)
+    # Re-calculate d1/d2 using numpy for speed
+    T_vec = np.maximum(full_df['time_to_expire_years'], 0.001)
+    S_vec = full_df['underlyingPrice']
+    K_vec = full_df['strike']
+    sigma_vec = np.maximum(full_df['iv'], 0.001) # Avoid division by zero
+    sqrt_T = np.sqrt(T_vec)
+    
+    d1 = (np.log(S_vec / K_vec) + (r + 0.5 * sigma_vec ** 2) * T_vec) / (sigma_vec * sqrt_T)
+    d2 = d1 - sigma_vec * sqrt_T
+    pdf_d1 = (1 / np.sqrt(2 * np.pi)) * np.exp(-0.5 * d1 ** 2)
+    
+    # Vanna: dDelta/dSigma (Skew risk)
+    full_df['vanna'] = -pdf_d1 * d2 / sigma_vec
+    
+    # Volga: dVega/dSigma (Vol-of-Vol risk)
+    full_df['volga'] = full_df['vega'] * d1 * d2 / sigma_vec
+    
+    # Cash Gamma: Dollar risk exposure (Gamma * S^2 / 100)
+    full_df['cash_gamma'] = full_df['gamma'] * (S_vec ** 2) / 100.0
+
+    # Fill NaNs with 0 (safe default for regression) instead of dropping rows
+    full_df = full_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    
     # Filter valid IV
     full_df = full_df[(full_df['iv'] > 0.01) & (full_df['iv'] < 5.0)].copy()
     
@@ -177,7 +209,10 @@ def train_xgboost():
         'moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 
         'delta', 'theta', 'is_call', 'dist_from_atm', 'inv_price',
         'log_price', 'sqrt_time', 'iv_moneyness', 'iv_squared', 'time_iv',
-        'intrinsic_ratio', 'time_value_ratio'
+        'intrinsic_ratio', 'time_value_ratio',
+        # NEW FEATURES
+        'strike_mod_5', 'strike_mod_1', 'is_low_price', 
+        'vanna', 'volga', 'cash_gamma'
     ]
     
     # Target: Residual (Actual Spread - Polynomial Baseline)
@@ -192,16 +227,33 @@ def train_xgboost():
         X, y, full_df['poly_hint'], test_size=0.2, random_state=42
     )
     
+    # Custom Asymmetric SQUARED Loss Function
+    # Avoids constant gradients of MAE which caused convergence failure (0 feature importance)
+    # Still penalizes underestimation (y_true > y_pred) heavily
+    def asymmetric_squared_loss(y_true, y_pred):
+        residual = y_true - y_pred # Positive = Underestimation (Bad)
+        
+        # Penalty factor for underestimation
+        alpha = 5.0 
+        
+        # Gradient = dL/dy_pred = -2 * residual * weight
+        grad = -2.0 * residual * np.where(residual > 0, alpha, 1.0)
+        
+        # Hessian = d^2L/dy_pred^2 = 2 * weight
+        hess = 2.0 * np.where(residual > 0, alpha, 1.0)
+        
+        return grad, hess
+
     # Train XGBoost with early stopping for better generalization
     model = xgb.XGBRegressor(
-        objective='reg:absoluteerror',
-        n_estimators=500,
+        objective=asymmetric_squared_loss, # Use stable squared loss
+        n_estimators=1000,                 # More estimators for smoother convergence
         max_depth=6,
         learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         min_child_weight=5,
-        early_stopping_rounds=20
+        early_stopping_rounds=50
     )
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     print(f"Best iteration: {model.best_iteration}")
@@ -214,7 +266,7 @@ def train_xgboost():
     mae = mean_absolute_error(actual_spread, final_pred)
     mean_spread = actual_spread.mean()
     
-    print(f"\n--- Production-Ready Model (No volume/OI/bid/ask features) ---")
+    print(f"\n--- Production-Ready Model (v2 Microstructure Features) ---")
     print(f"Mean Absolute Error (Spread $): ${mae:.4f}")
     print(f"Mean Spread in Test Set:        ${mean_spread:.4f}")
     print(f"Error as % of Spread:           {mae/mean_spread:.2%}")

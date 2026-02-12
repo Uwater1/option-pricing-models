@@ -145,12 +145,15 @@ def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
                   POLY_COEFFS['b6']*T*IV)
     return max(0.001, min(0.5, rel_spread)) * last_price
 
-# Feature names for XGBoost DMatrix — production-only features
+# Feature names for XGBoost DMatrix — production-only features (v2)
 _XGB_FEATURE_NAMES = [
     'moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega',
     'delta', 'theta', 'is_call', 'dist_from_atm', 'inv_price',
     'log_price', 'sqrt_time', 'iv_moneyness', 'iv_squared', 'time_iv',
-    'intrinsic_ratio', 'time_value_ratio'
+    'intrinsic_ratio', 'time_value_ratio',
+    # NEW FEATURES
+    'strike_mod_5', 'strike_mod_1', 'is_low_price', 
+    'vanna', 'volga', 'cash_gamma'
 ]
 
 def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, theta,
@@ -167,7 +170,7 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
         _xgb_model_cache[model_path] = model
     model = _xgb_model_cache[model_path]
     
-    # Compute production-available features
+    # Compute production-available features (Basic)
     dist_from_atm = abs(moneyness - 1.0)
     inv_price = 1.0 / max(last_price, 0.01)
     log_price = np.log(max(last_price, 0.01))
@@ -184,12 +187,39 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
     intrinsic_ratio = min(intrinsic / max(last_price, 0.01), 10.0)
     time_value = max(last_price - intrinsic, 0)
     time_value_ratio = time_value / max(last_price, 0.01)
+
+    # --- NEW MICROSTRUCTURE FEATURES ---
+    # 1. Strike Roundness
+    strike_mod_5 = 1 if (strike % 5 == 0) else 0
+    strike_mod_1 = 1 if (strike % 1 == 0) else 0
+
+    # 2. Tick Size Regime
+    is_low_price = 1 if (last_price < 3.0) else 0
+
+    # 3. Advanced Greeks (Vanna / Volga / Cash Gamma)
+    # Re-calculate parameters for d1/d2
+    T = max(time_to_expire_years, 0.001)
+    sigma = max(iv, 0.001)
+    r = 0.05
+    sqrt_T = np.sqrt(T)
+    
+    d1 = (np.log(underlying_price / strike) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    pdf_d1 = 0.39894228 * np.exp(-0.5 * d1 * d1) # 1/sqrt(2pi) approx 0.3989
+    
+    vanna = -pdf_d1 * d2 / sigma
+    volga = vega * d1 * d2 / sigma
+    cash_gamma = gamma * (underlying_price ** 2) / 100.0
     
     # Build feature array (must match _XGB_FEATURE_NAMES order)
     features = np.array([[moneyness, time_to_expire_years, iv, gamma, vega, delta, theta,
                           int(is_call), dist_from_atm, inv_price,
                           log_price, sqrt_time, iv_moneyness, iv_squared, time_iv,
-                          intrinsic_ratio, time_value_ratio]])
+                          intrinsic_ratio, time_value_ratio,
+                          
+                          strike_mod_5, strike_mod_1, is_low_price,
+                          vanna, volga, cash_gamma]])
+                          
     dtest = xgb.DMatrix(features, feature_names=_XGB_FEATURE_NAMES)
     
     # Predict the RESIDUAL (correction)
