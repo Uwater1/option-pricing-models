@@ -93,7 +93,7 @@ def train_xgboost():
         (full_df['mid'] > 0.05) 
     ].copy()
 
-    print("Calculating Features (IV, Gamma, Vega, 1/Price)...")
+    print("Calculating Features (IV, Greeks — production-available only)...")
     
     if 'underlyingPrice' not in full_df.columns:
          full_df['underlyingPrice'] = full_df['strike'] * full_df['moneyness']
@@ -103,7 +103,8 @@ def train_xgboost():
     ivs = []
     gammas = []
     vegas = []
-    inv_prices = []
+    deltas = []
+    thetas = []
     
     for _, row in full_df.iterrows():
         time_years = max(row['time_to_expire_years'], 0.001)
@@ -111,48 +112,74 @@ def train_xgboost():
         S = row['underlyingPrice']
         K = row['strike']
         
-        # IV
+        # IV — computed from lastPrice (production-available)
         iv = fast_iv(price, S, K, time_years, r, row['optionType'])
         
         # Clamp IV for stability
         if iv < 0.001: iv = 0.001
         if iv > 5.0: iv = 5.0
             
-        # Gamma & Vega
+        # Greeks
         gamma = fast_gamma(S, K, time_years, r, iv)
         vega = fast_vega(S, K, time_years, r, iv)
+        delta = fast_delta(S, K, time_years, r, iv, row['optionType'])
+        theta = fast_theta(S, K, time_years, r, iv, row['optionType'])
         
         ivs.append(iv)
         gammas.append(gamma)
         vegas.append(vega)
-        inv_prices.append(1.0 / price if price > 0 else 0.0)
+        deltas.append(delta)
+        thetas.append(theta)
 
     full_df['iv'] = ivs
     full_df['gamma'] = gammas
     full_df['vega'] = vegas
-    full_df['delta'] = [fast_delta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
-    full_df['theta'] = [fast_theta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
+    full_df['delta'] = deltas
+    full_df['theta'] = thetas
     
-    # Calculate Polynomial Spread "Hint" for Stacking
+    # Calculate Polynomial Spread "Hint" for Stacking (uses lastPrice, not mid)
     full_df['poly_hint'] = [get_poly_pred(row['moneyness'], max(row['time_to_expire_years'], 0.001), iv) * row['lastPrice'] for (_, row), iv in zip(full_df.iterrows(), ivs)]
     
-    full_df['log_volume'] = np.log1p(full_df['volume'])
-    full_df['log_oi'] = np.log1p(full_df['openInterest'])
+    # --- PRODUCTION-AVAILABLE features only ---
+    # Basic features (derivable from the 5 production inputs)
     full_df['is_call'] = (full_df['optionType'] == 'call').astype(int)
     full_df['dist_from_atm'] = np.abs(full_df['moneyness'] - 1.0)
-    full_df['inv_price'] = inv_prices
+    full_df['inv_price'] = 1.0 / full_df['lastPrice'].clip(lower=0.01)
+    
+    # NEW engineered features to compensate for missing volume/OI/mid
+    full_df['log_price'] = np.log(full_df['lastPrice'].clip(lower=0.01))
+    full_df['sqrt_time'] = np.sqrt(full_df['time_to_expire_years'].clip(lower=0.001))
+    full_df['iv_moneyness'] = full_df['iv'] * full_df['moneyness']
+    full_df['iv_squared'] = full_df['iv'] ** 2
+    full_df['time_iv'] = full_df['time_to_expire_years'] * full_df['iv']
+    
+    # Intrinsic value ratio: how deep ITM/OTM the option is
+    full_df['intrinsic'] = np.where(
+        full_df['is_call'] == 1,
+        np.maximum(0, full_df['underlyingPrice'] - full_df['strike']),
+        np.maximum(0, full_df['strike'] - full_df['underlyingPrice'])
+    )
+    full_df['intrinsic_ratio'] = full_df['intrinsic'] / full_df['lastPrice'].clip(lower=0.01)
+    full_df['intrinsic_ratio'] = full_df['intrinsic_ratio'].clip(upper=10.0)
+    
+    # Time value ratio: fraction of price that is extrinsic/time value
+    full_df['time_value'] = (full_df['lastPrice'] - full_df['intrinsic']).clip(lower=0)
+    full_df['time_value_ratio'] = full_df['time_value'] / full_df['lastPrice'].clip(lower=0.01)
     
     # Filter valid IV
     full_df = full_df[(full_df['iv'] > 0.01) & (full_df['iv'] < 5.0)].copy()
     
     print(f"Training on {len(full_df)} rows.")
     
-    # Features
+    # PRODUCTION-ONLY features: everything derivable from
+    # (lastPrice, strike, underlyingPrice, days_to_expire, optionType)
     features = [
         'moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 
-        'delta', 'theta', 'log_volume', 'log_oi', 'is_call', 'dist_from_atm',
-        'inv_price', 'mid'
+        'delta', 'theta', 'is_call', 'dist_from_atm', 'inv_price',
+        'log_price', 'sqrt_time', 'iv_moneyness', 'iv_squared', 'time_iv',
+        'intrinsic_ratio', 'time_value_ratio'
     ]
+    
     # Target: Residual (Actual Spread - Polynomial Baseline)
     full_df['residual'] = full_df['spread'] - full_df['poly_hint']
     target = 'residual'
@@ -165,9 +192,19 @@ def train_xgboost():
         X, y, full_df['poly_hint'], test_size=0.2, random_state=42
     )
     
-    # Train XGBoost
-    model = xgb.XGBRegressor(objective='reg:absoluteerror', n_estimators=100, max_depth=6, learning_rate=0.1)
-    model.fit(X_train, y_train)
+    # Train XGBoost with early stopping for better generalization
+    model = xgb.XGBRegressor(
+        objective='reg:absoluteerror',
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,
+        early_stopping_rounds=20
+    )
+    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+    print(f"Best iteration: {model.best_iteration}")
     
     # Evaluate Layered Model
     residual_pred = model.predict(X_test)
@@ -177,7 +214,7 @@ def train_xgboost():
     mae = mean_absolute_error(actual_spread, final_pred)
     mean_spread = actual_spread.mean()
     
-    print(f"\n--- Layered Model Performance (Poly + XGB Residuals) ---")
+    print(f"\n--- Production-Ready Model (No volume/OI/bid/ask features) ---")
     print(f"Mean Absolute Error (Spread $): ${mae:.4f}")
     print(f"Mean Spread in Test Set:        ${mean_spread:.4f}")
     print(f"Error as % of Spread:           {mae/mean_spread:.2%}")
@@ -189,8 +226,10 @@ def train_xgboost():
     
     # Feature Importance
     print("\nFeature Importance:")
-    for name, imp in zip(features, model.feature_importances_):
-        print(f"{name}: {imp:.4f}")
+    importances = sorted(zip(features, model.feature_importances_), key=lambda x: -x[1])
+    for name, imp in importances:
+        bar = '█' * int(imp * 50)
+        print(f"  {name:25s}: {imp:.4f} {bar}")
         
     # Save Model
     model.save_model("spread_xgb.json")

@@ -1,99 +1,86 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import xgboost as xgb
-import ctypes
 import os
 
-# Load C++ Library
-lib_path = os.path.join(os.path.dirname(__file__), 'libbs.so')
-lib = ctypes.CDLL(lib_path)
-lib.implied_volatility.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
-lib.implied_volatility.restype = ctypes.c_double
-lib.black_scholes_vega.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
-lib.black_scholes_vega.restype = ctypes.c_double
-lib.black_scholes_gamma.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
-lib.black_scholes_gamma.restype = ctypes.c_double
+from estimate_fair_value import estimate_fair_value
 
-def fast_iv(price, S, K, T, r, is_call):
-    return lib.implied_volatility(price, S, K, T, r, is_call)
-def fast_vega(S, K, T, r, sigma):
-    return lib.black_scholes_vega(S, K, T, r, sigma)
-def fast_gamma(S, K, T, r, sigma):
-    return lib.black_scholes_gamma(S, K, T, r, sigma)
-
-def verify_on_ticker_xgb(ticker, file_path, model_path="spread_xgb.json"):
-    print(f"\n--- Verifying XGBoost Model on {ticker} ---")
+def verify_on_ticker(ticker, file_path):
+    """
+    Verify estimate_fair_value under PRODUCTION conditions.
+    Only last_price is provided — no bid, ask, volume, or open interest.
+    """
+    print(f"\n--- Verifying on {ticker} (Production Mode: last_price only) ---")
     try:
         df = pd.read_csv(file_path)
     except FileNotFoundError:
         print(f"File not found: {file_path}")
         return None
 
-    if 'mid_price' not in df.columns:
-        df['mid_price'] = (df['ask'] + df['bid']) / 2
-        
-    df = df[(df['bid'] > 0) & (df['ask'] > 0) & (df['lastPrice'] > 0)].copy()
-    
+    # Apply same filters as training
+    df['lastTradeDate'] = pd.to_datetime(df['lastTradeDate'])
+    df = df[
+        (df['bid'] > 0) & 
+        (df['ask'] >= 0.01) & 
+        (df['lastPrice'] > 0) &
+        (df['volume'] >= 5) &
+        (df['openInterest'] >= 5) &
+        (df['lastTradeDate'] >= '2025-02-09')
+    ].copy()
+
     if 'underlyingPrice' not in df.columns:
         df['underlyingPrice'] = df['strike'] * df['moneyness']
+
+    # Moneyness filter
+    df = df[
+        (df['moneyness'] > 0.5) & (df['moneyness'] < 1.5) &
+        (df['lastPrice'] > 0.05)
+    ].copy()
     
-    print("Calculating Features...")
-    r = 0.05
-    ivs, gammas, vegas, inv_prices = [], [], [], []
+    df['actual_spread'] = df['ask'] - df['bid']
+    df = df[df['actual_spread'] > 0].copy()
+    
+    if len(df) == 0:
+        print(f"  No valid rows for {ticker}")
+        return None
+
+    # --- Production test: only last_price, no bid/ask/volume/oi ---
+    pred_spreads = []
+    skipped = 0
     
     for _, row in df.iterrows():
-        time_years = max(row['time_to_expire_years'], 0.001)
-        price = row['lastPrice']
-        S = row['underlyingPrice']
-        K = row['strike']
-        is_call = 1 if row['optionType'].lower() == 'call' else 0
-        
-        iv = fast_iv(price, S, K, time_years, r, is_call)
-        if iv < 0.001: iv = 0.001
-        
-        gamma = fast_gamma(S, K, time_years, r, iv)
-        vega = fast_vega(S, K, time_years, r, iv)
-        
-        ivs.append(iv)
-        gammas.append(gamma)
-        vegas.append(vega)
-        inv_prices.append(1.0/price if price > 0 else 0)
-        
-    df['iv'] = ivs
-    df['gamma'] = gammas
-    df['vega'] = vegas
-    df['inv_price'] = inv_prices
+        res = estimate_fair_value(
+            last_price=row['lastPrice'],
+            strike=row['strike'],
+            underlying_price=row['underlyingPrice'],
+            days_to_expire=row['days_to_expire'],
+            option_type=row['optionType']
+        )
+        if res is None:
+            pred_spreads.append(np.nan)
+            skipped += 1
+        else:
+            pred_spreads.append(res['spread'])
     
-    # Predict
-    features = pd.DataFrame({
-        'moneyness': df['moneyness'],
-        'time_to_expire_years': df['time_to_expire_years'],
-        'iv': df['iv'],
-        'gamma': df['gamma'],
-        'vega': df['vega'],
-        'inv_price': df['inv_price'],
-        'mid': df['lastPrice'] # Using last price as 'mid' proxy for model feature, or mid_price if calculated
-    })
+    df['pred_spread'] = pred_spreads
+    df = df.dropna(subset=['pred_spread'])
     
-    # Ideally should use exact same features as training.
-    # Training used 'mid' as (ask+bid)/2. For verification we know ask/bid, so let's use actual mid.
-    features['mid'] = df['mid_price']
+    if len(df) == 0:
+        return None
     
-    dtest = xgb.DMatrix(features)
-    model = xgb.Booster()
-    model.load_model(model_path)
-    
-    df['pred_spread'] = model.predict(dtest)
-    df['actual_spread'] = df['ask'] - df['bid']
     df['error'] = (df['pred_spread'] - df['actual_spread']).abs()
     
     mae = df['error'].mean()
+    median_ae = df['error'].median()
     mean_spread = df['actual_spread'].mean()
+    rmse = np.sqrt(((df['pred_spread'] - df['actual_spread'])**2).mean())
     
-    print(f"MAE:            ${mae:.4f}")
-    print(f"Mean Spread:    ${mean_spread:.4f}")
-    print(f"Error % Spread: {mae/mean_spread:.2%}")
+    print(f"  Options tested: {len(df)} (skipped {skipped})")
+    print(f"  Mean Spread:    ${mean_spread:.4f}")
+    print(f"  MAE:            ${mae:.4f}")
+    print(f"  Median AE:      ${median_ae:.4f}")
+    print(f"  RMSE:           ${rmse:.4f}")
+    print(f"  MAE % Spread:   {mae/mean_spread:.2%}")
     
     return df
 
@@ -102,13 +89,29 @@ def main():
     dfs = []
     
     for t in check_tickers:
-        res = verify_on_ticker_xgb(t, f"data/{t}_options.csv")
+        res = verify_on_ticker(t, f"data/{t}_options.csv")
         if res is not None:
             res['Ticker'] = t
             dfs.append(res)
             
     if dfs:
         combined = pd.concat(dfs)
+        
+        # Overall MAE
+        overall_mae = combined['error'].mean()
+        overall_mean_spread = combined['actual_spread'].mean()
+        overall_rmse = np.sqrt(((combined['pred_spread'] - combined['actual_spread'])**2).mean())
+        
+        print(f"\n{'='*50}")
+        print(f"  OVERALL ({len(combined)} options)")
+        print(f"{'='*50}")
+        print(f"  Mean Spread:    ${overall_mean_spread:.4f}")
+        print(f"  MAE:            ${overall_mae:.4f}")
+        print(f"  RMSE:           ${overall_rmse:.4f}")
+        print(f"  MAE % Spread:   {overall_mae/overall_mean_spread:.2%}")
+        
+        # Plot
+        os.makedirs("analysis_results", exist_ok=True)
         plt.figure(figsize=(10, 5))
         plt.scatter(combined['actual_spread'], combined['pred_spread'], alpha=0.1, s=5)
         plt.plot([0, 10], [0, 10], 'r--')
@@ -116,7 +119,7 @@ def main():
         plt.ylim(0, 5)
         plt.xlabel('Actual Spread')
         plt.ylabel('Predicted Spread')
-        plt.title('XGBoost Spread Prediction (Absolute $)')
+        plt.title('Spread Prediction — Production Mode (last_price only)')
         plt.savefig("analysis_results/xgb_verification.png")
         print("\nSaved plot to analysis_results/xgb_verification.png")
 
