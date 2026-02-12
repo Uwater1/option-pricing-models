@@ -38,11 +38,15 @@ def train_model():
     full_df = pd.concat(dfs, ignore_index=True)
     
     # Preprocess
+    full_df['lastTradeDate'] = pd.to_datetime(full_df['lastTradeDate'])
+    
     full_df = full_df[
         (full_df['bid'] > 0) & 
-        (full_df['ask'] > 0) & 
+        (full_df['ask'] >= 0.01) & 
         (full_df['lastPrice'] > 0) &
-        (full_df['volume'] >= 5)
+        (full_df['volume'] >= 5) &
+        (full_df['openInterest'] >= 5) &
+        (full_df['lastTradeDate'] >= '2025-02-09')
     ].copy()
     
     full_df['spread'] = full_df['ask'] - full_df['bid']

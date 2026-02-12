@@ -39,6 +39,18 @@ def fast_theta(S, K, T, r, sigma, option_type):
     is_call = 1 if option_type.lower() == 'call' else 0
     return lib.black_scholes_theta(S, K, T, r, sigma, is_call)
 
+# Latest Polynomial Coefficients for Stacking
+POLY_COEFFS = {
+    'b0': 0.084359, 'b1': -0.141382, 'b2': 0.015238, 
+    'b3': 0.016147, 'b4': 0.067123, 'b5': 0.002284, 'b6': -0.039646
+}
+
+def get_poly_pred(M, T, IV):
+    rel_spread = (POLY_COEFFS['b0'] + POLY_COEFFS['b1']*M + POLY_COEFFS['b2']*T + 
+                  POLY_COEFFS['b3']*IV + POLY_COEFFS['b4']*M**2 + 
+                  POLY_COEFFS['b5']*T**2 + POLY_COEFFS['b6']*T*IV)
+    return rel_spread
+
 def train_xgboost():
     # 1. Load Data
     files = glob.glob("data/*.csv")
@@ -59,11 +71,15 @@ def train_xgboost():
     full_df = pd.concat(dfs, ignore_index=True)
     
     # Preprocess
+    full_df['lastTradeDate'] = pd.to_datetime(full_df['lastTradeDate'])
+    
     full_df = full_df[
         (full_df['bid'] > 0) & 
-        (full_df['ask'] > 0) & 
+        (full_df['ask'] >= 0.01) & 
         (full_df['lastPrice'] > 0) &
-        (full_df['volume'] >= 5)
+        (full_df['volume'] >= 5) &
+        (full_df['openInterest'] >= 5) &
+        (full_df['lastTradeDate'] >= '2025-02-09')
     ].copy()
     
     full_df['spread'] = full_df['ask'] - full_df['bid']
@@ -116,6 +132,10 @@ def train_xgboost():
     full_df['vega'] = vegas
     full_df['delta'] = [fast_delta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
     full_df['theta'] = [fast_theta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
+    
+    # Calculate Polynomial Spread "Hint" for Stacking
+    full_df['poly_hint'] = [get_poly_pred(row['moneyness'], max(row['time_to_expire_years'], 0.001), iv) * row['lastPrice'] for (_, row), iv in zip(full_df.iterrows(), ivs)]
+    
     full_df['log_volume'] = np.log1p(full_df['volume'])
     full_df['log_oi'] = np.log1p(full_df['openInterest'])
     full_df['is_call'] = (full_df['optionType'] == 'call').astype(int)
@@ -133,27 +153,39 @@ def train_xgboost():
         'delta', 'theta', 'log_volume', 'log_oi', 'is_call', 'dist_from_atm',
         'inv_price', 'mid'
     ]
-    # Target: Absolute Spread ($)
-    target = 'spread'
+    # Target: Residual (Actual Spread - Polynomial Baseline)
+    full_df['residual'] = full_df['spread'] - full_df['poly_hint']
+    target = 'residual'
     
     X = full_df[features]
     y = full_df[target]
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Keep track of poly_hint for evaluation
+    X_train, X_test, y_train, y_test, poly_train, poly_test = train_test_split(
+        X, y, full_df['poly_hint'], test_size=0.2, random_state=42
+    )
     
     # Train XGBoost
     model = xgb.XGBRegressor(objective='reg:absoluteerror', n_estimators=100, max_depth=6, learning_rate=0.1)
     model.fit(X_train, y_train)
     
-    # Evaluate
-    y_pred = model.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
-    mean_spread = y_test.mean()
+    # Evaluate Layered Model
+    residual_pred = model.predict(X_test)
+    final_pred = poly_test + residual_pred
+    actual_spread = poly_test + y_test
     
-    print(f"\n--- XGBoost Performance ---")
+    mae = mean_absolute_error(actual_spread, final_pred)
+    mean_spread = actual_spread.mean()
+    
+    print(f"\n--- Layered Model Performance (Poly + XGB Residuals) ---")
     print(f"Mean Absolute Error (Spread $): ${mae:.4f}")
     print(f"Mean Spread in Test Set:        ${mean_spread:.4f}")
     print(f"Error as % of Spread:           {mae/mean_spread:.2%}")
+    
+    # Baseline comparison
+    poly_mae = mean_absolute_error(actual_spread, poly_test)
+    print(f"Baseline Poly-only MAE:         ${poly_mae:.4f}")
+    print(f"Improvement over Poly-only:    {(poly_mae - mae)/poly_mae:.2%}")
     
     # Feature Importance
     print("\nFeature Importance:")

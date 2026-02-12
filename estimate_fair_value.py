@@ -108,16 +108,6 @@ def fast_theta(S, K, T, r, sigma, is_call):
         return lib.black_scholes_theta(S, K, T, r, sigma, is_call)
     return _python_theta(S, K, T, r, sigma, is_call)
 
-# Polynomial Coefficients (Fallback)
-POLY_COEFFS = {
-    'b0': 0.08769133666396281, 
-    'b1': -0.1427566794112866, 
-    'b2': 0.011059109313275509, 
-    'b3': 0.015123847563058122, 
-    'b4': 0.06712295469800335, 
-    'b5': 0.0022835772300375447, 
-    'b6': -0.03964616104997851
-}
 
 def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
     M, T, IV = moneyness, time_to_expire_years, iv
@@ -134,13 +124,12 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
     if not XGB_AVAILABLE or not os.path.exists(model_path):
         return None
     
-    # Features: ['moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 'delta', 'theta', 'log_volume', 'log_oi', 'is_call', 'dist_from_atm', 'inv_price', 'mid']
+    # Layer 2: Prediction of the Residual (Correction)
     inv_price = 1.0 / last_price if last_price > 0 else 0.0
     dist_from_atm = abs(moneyness - 1.0)
     log_volume = np.log1p(volume)
     log_oi = np.log1p(oi)
     
-    # Create DMatrix for single prediction
     import pandas as pd
     features = pd.DataFrame([{
         'moneyness': moneyness,
@@ -162,8 +151,15 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
     model.load_model(model_path)
     dtest = xgb.DMatrix(features)
     
-    pred_spread = model.predict(dtest)[0]
-    return max(0.01, pred_spread) # Minimum spread 1 cent
+    # Predict the RESIDUAL (correction)
+    residual_correction = model.predict(dtest)[0]
+    return residual_correction
+
+# Latest trained coefficients for the Baseline Layer
+POLY_COEFFS = {
+    'b0': 0.084359, 'b1': -0.141382, 'b2': 0.015238, 
+    'b3': 0.016147, 'b4': 0.067123, 'b5': 0.002284, 'b6': -0.042914
+}
 
 def estimate_fair_value(last_price, strike, underlying_price, days_to_expire, option_type='call'):
     # 1. Calculate Factors
@@ -190,15 +186,19 @@ def estimate_fair_value(last_price, strike, underlying_price, days_to_expire, op
     volume = 10 
     oi = 100
     
-    # 3. Predict Spread
-    # Try XGBoost first
-    predicted_spread = predict_spread_xgb(moneyness, time_years, iv, gamma, vega, delta, theta, volume, oi, is_call, last_price)
-    method = "XGBoost (Advanced)"
+    # 3. Layered Prediction
+    # Layer 1: Polynomial Baseline
+    baseline_spread = predict_spread_poly(moneyness, time_years, iv, last_price)
     
-    if predicted_spread is None:
-        # Fallback to Polynomial
-        predicted_spread = predict_spread_poly(moneyness, time_years, iv, last_price)
-        method = "Polynomial (Basic)"
+    # Layer 2: XGBoost Correction
+    correction = predict_spread_xgb(moneyness, time_years, iv, gamma, vega, delta, theta, volume, oi, is_call, last_price)
+    
+    if correction is not None:
+        predicted_spread = max(0.01, baseline_spread + correction)
+        method = "Layered (Poly + XGB Correction)"
+    else:
+        predicted_spread = baseline_spread
+        method = "Polynomial (Baseline Only)"
     
     # 4. Derive Bid/Ask
     fair_bid = last_price - (predicted_spread / 2)
