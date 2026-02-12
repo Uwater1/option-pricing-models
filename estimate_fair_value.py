@@ -49,6 +49,22 @@ def _python_gamma(S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     return norm.pdf(d1) / (S * sigma * np.sqrt(T))
 
+def _python_delta(S, K, T, r, sigma, is_call):
+    """Pure Python fallback for delta calculation."""
+    T = max(T, 1e-10)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    return norm.cdf(d1) if is_call else (norm.cdf(d1) - 1.0)
+
+def _python_theta(S, K, T, r, sigma, is_call):
+    """Pure Python fallback for theta calculation."""
+    T = max(T, 1e-10)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    term1 = -(S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
+    term2 = r * K * np.exp(-r * T) * norm.cdf(d2)
+    term3 = r * K * np.exp(-r * T) * norm.cdf(-d2)
+    return (term1 - term2) / 365.0 if is_call else (term1 + term3) / 365.0
+
 lib_path = os.path.join(os.path.dirname(__file__), 'libbs.so')
 try:
     lib = ctypes.CDLL(lib_path)
@@ -58,6 +74,10 @@ try:
     lib.black_scholes_vega.restype = ctypes.c_double
     lib.black_scholes_gamma.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
     lib.black_scholes_gamma.restype = ctypes.c_double
+    lib.black_scholes_delta.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
+    lib.black_scholes_delta.restype = ctypes.c_double
+    lib.black_scholes_theta.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
+    lib.black_scholes_theta.restype = ctypes.c_double
     CPP_LIB_AVAILABLE = True
 except OSError:
     print("Warning: Could not load C++ library libbs.so. Falling back to pure Python implementation.")
@@ -78,15 +98,25 @@ def fast_gamma(S, K, T, r, sigma):
         return lib.black_scholes_gamma(S, K, T, r, sigma)
     return _python_gamma(S, K, T, r, sigma)
 
+def fast_delta(S, K, T, r, sigma, is_call):
+    if CPP_LIB_AVAILABLE:
+        return lib.black_scholes_delta(S, K, T, r, sigma, is_call)
+    return _python_delta(S, K, T, r, sigma, is_call)
+
+def fast_theta(S, K, T, r, sigma, is_call):
+    if CPP_LIB_AVAILABLE:
+        return lib.black_scholes_theta(S, K, T, r, sigma, is_call)
+    return _python_theta(S, K, T, r, sigma, is_call)
+
 # Polynomial Coefficients (Fallback)
 POLY_COEFFS = {
-    'b0': 0.07217830754411238, 
-    'b1': -0.10741680766063832, 
-    'b2': 0.024817628008708924, 
-    'b3': 0.01673389789242793, 
-    'b4': 0.04570831072599171, 
-    'b5': -0.0031195961528276395, 
-    'b6': -0.04091022400898136
+    'b0': 0.08769133666396281, 
+    'b1': -0.1427566794112866, 
+    'b2': 0.011059109313275509, 
+    'b3': 0.015123847563058122, 
+    'b4': 0.06712295469800335, 
+    'b5': 0.0022835772300375447, 
+    'b6': -0.03964616104997851
 }
 
 def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
@@ -100,15 +130,17 @@ def predict_spread_poly(moneyness, time_to_expire_years, iv, last_price):
                   POLY_COEFFS['b6']*T*IV)
     return max(0.001, min(0.5, rel_spread)) * last_price
 
-def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, last_price, model_path="spread_xgb.json"):
+def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, theta, volume, oi, is_call, last_price, model_path="spread_xgb.json"):
     if not XGB_AVAILABLE or not os.path.exists(model_path):
         return None
     
-    # Features: ['moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 'inv_price', 'mid']
+    # Features: ['moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 'delta', 'theta', 'log_volume', 'log_oi', 'is_call', 'dist_from_atm', 'inv_price', 'mid']
     inv_price = 1.0 / last_price if last_price > 0 else 0.0
+    dist_from_atm = abs(moneyness - 1.0)
+    log_volume = np.log1p(volume)
+    log_oi = np.log1p(oi)
     
     # Create DMatrix for single prediction
-    # Note: feature names must match training
     import pandas as pd
     features = pd.DataFrame([{
         'moneyness': moneyness,
@@ -116,6 +148,12 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, last_pr
         'iv': iv,
         'gamma': gamma,
         'vega': vega,
+        'delta': delta,
+        'theta': theta,
+        'log_volume': log_volume,
+        'log_oi': log_oi,
+        'is_call': int(is_call),
+        'dist_from_atm': dist_from_atm,
         'inv_price': inv_price,
         'mid': last_price
     }])
@@ -141,14 +179,20 @@ def estimate_fair_value(last_price, strike, underlying_price, days_to_expire, op
     iv = fast_iv(last_price, underlying_price, strike, time_years, r, is_call)
     
     if iv <= 0.001: iv = 0.3 # Fallback if IV fails
-    if iv > 5.0: iv = 5.0    # Clamp
+    if iv > 10.0: iv = 10.0    # Clamp
         
+    theta = fast_theta(underlying_price, strike, time_years, r, iv, is_call)
+    delta = fast_delta(underlying_price, strike, time_years, r, iv, is_call)
     gamma = fast_gamma(underlying_price, strike, time_years, r, iv)
     vega = fast_vega(underlying_price, strike, time_years, r, iv)
     
+    # Liquidity proxies (default to 10 if not provided for safety in inference)
+    volume = 10 
+    oi = 100
+    
     # 3. Predict Spread
     # Try XGBoost first
-    predicted_spread = predict_spread_xgb(moneyness, time_years, iv, gamma, vega, last_price)
+    predicted_spread = predict_spread_xgb(moneyness, time_years, iv, gamma, vega, delta, theta, volume, oi, is_call, last_price)
     method = "XGBoost (Advanced)"
     
     if predicted_spread is None:

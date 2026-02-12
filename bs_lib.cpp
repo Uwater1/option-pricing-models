@@ -49,6 +49,38 @@ double black_scholes_gamma(double S, double K, double T, double r,
   return norm_pdf(d1) / (S * sigma * std::sqrt(T));
 }
 
+double black_scholes_delta(double S, double K, double T, double r, double sigma,
+                           int is_call) {
+  if (T <= 0) {
+    if (is_call)
+      return S > K ? 1.0 : 0.0;
+    else
+      return S < K ? -1.0 : 0.0;
+  }
+  double d1 = (std::log(S / K) + (r + 0.5 * sigma * sigma) * T) /
+              (sigma * std::sqrt(T));
+  return is_call ? norm_cdf(d1) : (norm_cdf(d1) - 1.0);
+}
+
+double black_scholes_theta(double S, double K, double T, double r, double sigma,
+                           int is_call) {
+  if (T <= 0)
+    return 0.0;
+  double d1 = (std::log(S / K) + (r + 0.5 * sigma * sigma) * T) /
+              (sigma * std::sqrt(T));
+  double d2 = d1 - sigma * std::sqrt(T);
+
+  double term1 = -(S * norm_pdf(d1) * sigma) / (2 * std::sqrt(T));
+  double term2 = r * K * std::exp(-r * T) * norm_cdf(d2);
+  double term3 = r * K * std::exp(-r * T) * norm_cdf(-d2);
+
+  if (is_call) {
+    return (term1 - term2) / 365.0; // Daily theta
+  } else {
+    return (term1 + term3) / 365.0; // Daily theta
+  }
+}
+
 // Implied Volatility using Newton-Raphson
 double implied_volatility(double target_price, double S, double K, double T,
                           double r, int is_call) {

@@ -16,6 +16,10 @@ lib.black_scholes_vega.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_do
 lib.black_scholes_vega.restype = ctypes.c_double
 lib.black_scholes_gamma.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
 lib.black_scholes_gamma.restype = ctypes.c_double
+lib.black_scholes_delta.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
+lib.black_scholes_delta.restype = ctypes.c_double
+lib.black_scholes_theta.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
+lib.black_scholes_theta.restype = ctypes.c_double
 
 def fast_iv(price, S, K, T, r, option_type):
     is_call = 1 if option_type.lower() == 'call' else 0
@@ -26,6 +30,14 @@ def fast_vega(S, K, T, r, sigma):
 
 def fast_gamma(S, K, T, r, sigma):
     return lib.black_scholes_gamma(S, K, T, r, sigma)
+
+def fast_delta(S, K, T, r, sigma, option_type):
+    is_call = 1 if option_type.lower() == 'call' else 0
+    return lib.black_scholes_delta(S, K, T, r, sigma, is_call)
+
+def fast_theta(S, K, T, r, sigma, option_type):
+    is_call = 1 if option_type.lower() == 'call' else 0
+    return lib.black_scholes_theta(S, K, T, r, sigma, is_call)
 
 def train_xgboost():
     # 1. Load Data
@@ -50,7 +62,8 @@ def train_xgboost():
     full_df = full_df[
         (full_df['bid'] > 0) & 
         (full_df['ask'] > 0) & 
-        (full_df['lastPrice'] > 0)
+        (full_df['lastPrice'] > 0) &
+        (full_df['volume'] >= 5)
     ].copy()
     
     full_df['spread'] = full_df['ask'] - full_df['bid']
@@ -101,6 +114,12 @@ def train_xgboost():
     full_df['iv'] = ivs
     full_df['gamma'] = gammas
     full_df['vega'] = vegas
+    full_df['delta'] = [fast_delta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
+    full_df['theta'] = [fast_theta(row['underlyingPrice'], row['strike'], max(row['time_to_expire_years'], 0.001), 0.05, iv, row['optionType']) for (_, row), iv in zip(full_df.iterrows(), ivs)]
+    full_df['log_volume'] = np.log1p(full_df['volume'])
+    full_df['log_oi'] = np.log1p(full_df['openInterest'])
+    full_df['is_call'] = (full_df['optionType'] == 'call').astype(int)
+    full_df['dist_from_atm'] = np.abs(full_df['moneyness'] - 1.0)
     full_df['inv_price'] = inv_prices
     
     # Filter valid IV
@@ -109,7 +128,11 @@ def train_xgboost():
     print(f"Training on {len(full_df)} rows.")
     
     # Features
-    features = ['moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 'inv_price', 'mid']
+    features = [
+        'moneyness', 'time_to_expire_years', 'iv', 'gamma', 'vega', 
+        'delta', 'theta', 'log_volume', 'log_oi', 'is_call', 'dist_from_atm',
+        'inv_price', 'mid'
+    ]
     # Target: Absolute Spread ($)
     target = 'spread'
     

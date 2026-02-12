@@ -41,7 +41,8 @@ def train_model():
     full_df = full_df[
         (full_df['bid'] > 0) & 
         (full_df['ask'] > 0) & 
-        (full_df['lastPrice'] > 0)
+        (full_df['lastPrice'] > 0) &
+        (full_df['volume'] >= 5)
     ].copy()
     
     full_df['spread'] = full_df['ask'] - full_df['bid']
