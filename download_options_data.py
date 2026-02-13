@@ -84,7 +84,7 @@ def download_options_data(ticker_symbol, output_dir="data"):
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
         
-        output_file = os.path.join(output_dir, f"{ticker_symbol}_options_2.csv")
+        output_file = os.path.join(output_dir, f"{ticker_symbol}_options_4.csv")
         final_df.to_csv(output_file, index=False)
         print(f"Successfully saved {len(final_df)} rows to {output_file}")
     else:
