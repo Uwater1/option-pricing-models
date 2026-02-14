@@ -89,7 +89,8 @@ def main():
     dfs = []
     
     for t in check_tickers:
-        res = verify_on_ticker(t, f"data/{t}_options.csv")
+        # Use Group 4 (Test Set) for verification
+        res = verify_on_ticker(t, f"data/{t}_options_4.csv")
         if res is not None:
             res['Ticker'] = t
             dfs.append(res)

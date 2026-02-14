@@ -14,13 +14,13 @@ def fast_iv(price, S, K, T, r, is_call):
 # Model Coefficients (Trained on SPY, QQQ, NVDA)
 # Model: RelativeSpread = b0 + b1*M + b2*T + b3*IV + b4*M^2 + b5*T^2 + b6*T*IV
 COEFFS = {
-    'b0': 0.08435910157616279, 
-    'b1': -0.14138231593843822, 
-    'b2': 0.015237941763599355, 
-    'b3': 0.016146873728418405, 
-    'b4': 0.06674618886979494, 
-    'b5': 0.0012808918801879127, 
-    'b6': -0.04291380581474171
+    'b0': 0.093480, 
+    'b1': -0.153181, 
+    'b2': 0.012322, 
+    'b3': 0.012915, 
+    'b4': 0.071723, 
+    'b5': 0.002246, 
+    'b6': -0.042443
 }
 
 def predict_relative_spread(moneyness, time_to_expire_years, iv):

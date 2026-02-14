@@ -230,8 +230,8 @@ def predict_spread_xgb(moneyness, time_to_expire_years, iv, gamma, vega, delta, 
 # IMPORTANT: These must match the coefficients used in train_xgboost_model.py
 # because the XGBoost model predicts residuals relative to this baseline.
 POLY_COEFFS = {
-    'b0': 0.084359, 'b1': -0.141382, 'b2': 0.015238, 
-    'b3': 0.016147, 'b4': 0.067123, 'b5': 0.002284, 'b6': -0.039646
+    'b0': 0.093480, 'b1': -0.153181, 'b2': 0.012322, 
+    'b3': 0.012915, 'b4': 0.071723, 'b5': 0.002246, 'b6': -0.042443
 }
 
 def estimate_fair_value(last_price, strike, underlying_price, days_to_expire, option_type='call'):

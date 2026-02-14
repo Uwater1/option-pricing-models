@@ -4,6 +4,7 @@ import glob
 import os
 import ctypes
 from scipy.optimize import curve_fit
+import re
 
 # Load C++ Library
 lib = ctypes.CDLL('./libbs.so')
@@ -26,13 +27,27 @@ def train_model():
     dfs = []
     for f in files:
         try:
+            # ONLY use files with "options" in the name (e.g., AAPL_options.csv)
+            # Ignore other files like AAPL-2026-02-20.csv
+            if "options" not in f:
+                continue
+
+            # Determine group ID
+            # _2.csv -> 2, _3.csv -> 3, _4.csv -> 4, else 1 (no suffix)
+            match = re.search(r'_(\d+)\.csv$', f)
+            if match:
+                group_id = int(match.group(1))
+            else:
+                group_id = 1
+            
             df = pd.read_csv(f)
+            df['group_id'] = group_id
             dfs.append(df)
         except Exception as e:
             print(f"Skipping {f}: {e}")
             
     if not dfs:
-        print("No data found.")
+        print("No 'options' data found.")
         return
 
     full_df = pd.concat(dfs, ignore_index=True)
@@ -79,7 +94,7 @@ def train_model():
         time_years = max(row['time_to_expire_years'], 0.001)
         
         iv = fast_iv(
-            row['lastPrice'], 
+            row['mid'], 
             row['underlyingPrice'], 
             row['strike'], 
             time_years, 
@@ -93,12 +108,23 @@ def train_model():
     # Filter valid IV
     full_df = full_df[(full_df['iv'] > 0.01) & (full_df['iv'] < 5.0)].copy()
     
-    print(f"Training on {len(full_df)} rows.")
     
-    X_data = (full_df['moneyness'].values, full_df['time_to_expire_years'].values, full_df['iv'].values)
-    y_data = full_df['relative_spread'].values
+    # Split into Train (Group 1-3) and Test (Group 4)
+    train_df = full_df[full_df['group_id'].isin([1, 2, 3])].copy()
+    test_df = full_df[full_df['group_id'] == 4].copy()
     
-    popt, pcov = curve_fit(polynomial_model, X_data, y_data)
+    print(f"Total rows: {len(full_df)}")
+    print(f"Training on {len(train_df)} rows (Groups 1-3).")
+    print(f"Testing on {len(test_df)} rows (Group 4).")
+    
+    if len(train_df) == 0:
+        print("Error: No training data available.")
+        return
+
+    X_train = (train_df['moneyness'].values, train_df['time_to_expire_years'].values, train_df['iv'].values)
+    y_train = train_df['relative_spread'].values
+    
+    popt, pcov = curve_fit(polynomial_model, X_train, y_train)
     
     print("\n--- Model Coefficients ---")
     coeffs = {
@@ -112,9 +138,20 @@ def train_model():
     print("\nCopy this dictionary into your prediction script:")
     print(coeffs)
     
-    y_pred = polynomial_model(X_data, *popt)
-    mae = np.mean(np.abs(y_pred - y_data))
-    print(f"\nMean Absolute Error (Relative Spread): {mae:.4f}")
+    # Training Error
+    y_train_pred = polynomial_model(X_train, *popt)
+    mae_train = np.mean(np.abs(y_train_pred - y_train))
+    print(f"\nTraining MAE (Relative Spread): {mae_train:.4f}")
+    
+    # Testing Error
+    if len(test_df) > 0:
+        X_test = (test_df['moneyness'].values, test_df['time_to_expire_years'].values, test_df['iv'].values)
+        y_test = test_df['relative_spread'].values
+        y_test_pred = polynomial_model(X_test, *popt)
+        mae_test = np.mean(np.abs(y_test_pred - y_test))
+        print(f"Testing MAE (Group 4) (Relative Spread): {mae_test:.4f}")
+    else:
+        print("No testing data available for Group 4.")
 
 if __name__ == "__main__":
     train_model()
